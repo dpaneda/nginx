@@ -56,6 +56,7 @@ typedef struct {
     time_t                      disk_full_time;
     time_t                      error_log_time;
     ngx_http_log_fmt_t         *format;
+    ngx_int_t                   rate_limit;
 
 #if (NGX_ENABLE_SYSLOG)
     ngx_int_t                   priority;
@@ -143,7 +144,7 @@ static ngx_command_t  ngx_http_log_commands[] = {
 
     { ngx_string("access_log"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
-                        |NGX_HTTP_LMT_CONF|NGX_CONF_TAKE123,
+                        |NGX_HTTP_LMT_CONF|NGX_CONF_TAKE1234,
       ngx_http_log_set_log,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -328,7 +329,16 @@ ngx_http_log_write(ngx_http_request_t *r, ngx_http_log_t *log, u_char *buf,
     time_t      now;
     ssize_t     n;
     ngx_err_t   err;
-    
+    static unsigned logged = 0;
+  
+    // Rate limiting
+    logged++;
+
+    if ((logged % log->rate_limit) == 0)
+        logged = 0;
+    else
+        return;
+
 #if (NGX_ENABLE_SYSLOG)
     n = 0;
     if (log->syslog_on) {
@@ -862,6 +872,7 @@ ngx_http_log_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     log->script = NULL;
     log->disk_full_time = 0;
     log->error_log_time = 0;
+    log->rate_limit = 1;
 #if (NGX_ENABLE_SYSLOG)
     log->priority = HTTP_SYSLOG_PRIORITY;
     log->syslog_on = 0;
@@ -958,6 +969,7 @@ ngx_http_log_set_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     ngx_memzero(log, sizeof(ngx_http_log_t));
+    log->rate_limit = 1;
 
 #if (NGX_ENABLE_SYSLOG)
     log->syslog_on = syslog_on;
@@ -1012,7 +1024,7 @@ ngx_http_log_set_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         if (log->file == NULL) {
             return NGX_CONF_ERROR;
         }
-        
+
     } else {
         if (ngx_conf_full_name(cf->cycle, &value[1], 0) != NGX_OK) {
             return NGX_CONF_ERROR;
@@ -1067,44 +1079,52 @@ ngx_http_log_set_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
 buffer:
 
-    if (cf->args->nelts == 4) {
-        if (ngx_strncmp(value[3].data, "buffer=", 7) != 0) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "invalid parameter \"%V\"", &value[3]);
-            return NGX_CONF_ERROR;
+    for (i = 3; i < cf->args->nelts; i++) {
+        if (ngx_strncmp(value[i].data, "rate_limit=", 11) == 0) {
+            log->rate_limit = ngx_atoi(value[i].data + 11, value[i].len - 11);
+
+            if (log->rate_limit == NGX_ERROR) {
+                return NGX_CONF_ERROR;
+            }
         }
+        else if (ngx_strncmp(value[i].data, "buffer=", 7) == 0) {
+            if (log->script) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "buffered logs can not have variables in name");
+                return NGX_CONF_ERROR;
+            }
 
-        if (log->script) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "buffered logs can not have variables in name");
-            return NGX_CONF_ERROR;
+            name.len = value[i].len - 7;
+            name.data = value[i].data + 7;
+
+            buf = ngx_parse_size(&name);
+
+            if (buf == NGX_ERROR) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "invalid parameter \"%V\"", &value[i]);
+                return NGX_CONF_ERROR;
+            }
+
+            if (log->file->buffer && log->file->last - log->file->pos != buf) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "access_log \"%V\" already defined "
+                                   "with different buffer size", &value[1]);
+                return NGX_CONF_ERROR;
+            }
+
+            log->file->buffer = ngx_palloc(cf->pool, buf);
+            if (log->file->buffer == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            log->file->pos = log->file->buffer;
+            log->file->last = log->file->buffer + buf;
         }
-
-        name.len = value[3].len - 7;
-        name.data = value[3].data + 7;
-
-        buf = ngx_parse_size(&name);
-
-        if (buf == NGX_ERROR) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "invalid parameter \"%V\"", &value[3]);
-            return NGX_CONF_ERROR;
+        else {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "invalid parameter \"%V\"", &value[i]);
+                return NGX_CONF_ERROR;
         }
-
-        if (log->file->buffer && log->file->last - log->file->pos != buf) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                               "access_log \"%V\" already defined "
-                               "with different buffer size", &value[1]);
-            return NGX_CONF_ERROR;
-        }
-
-        log->file->buffer = ngx_palloc(cf->pool, buf);
-        if (log->file->buffer == NULL) {
-            return NGX_CONF_ERROR;
-        }
-
-        log->file->pos = log->file->buffer;
-        log->file->last = log->file->buffer + buf;
     }
 
     return NGX_CONF_OK;
@@ -1444,7 +1464,6 @@ ngx_http_log_open_file_cache(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     return NGX_CONF_ERROR;
 }
-
 
 static ngx_int_t
 ngx_http_log_init(ngx_conf_t *cf)

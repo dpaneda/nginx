@@ -92,6 +92,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 #endif
     cycle->old_cycle = old_cycle;
 
+    cycle->new_log.rate_limit = 1;
     cycle->conf_prefix.len = old_cycle->conf_prefix.len;
     cycle->conf_prefix.data = ngx_pstrdup(pool, &old_cycle->conf_prefix);
     if (cycle->conf_prefix.data == NULL) {

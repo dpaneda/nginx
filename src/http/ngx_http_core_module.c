@@ -4514,7 +4514,17 @@ ngx_http_core_error_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_OK;
     }
 
-    return ngx_log_set_levels(cf, clcf->error_log);
+    if (ngx_strncmp(value[2].data, "rate_limit=", 11) == 0) {
+      clcf->error_log->rate_limit = ngx_atoi(value[2].data + 11, value[2].len - 11);
+      if (cf->args->nelts > 3) {
+        return ngx_log_set_levels(cf, &cf->cycle->new_log, 3);
+      }
+    }
+    else {
+      return ngx_log_set_levels(cf, &cf->cycle->new_log, 2);
+    }
+
+    return NGX_CONF_OK;
 }
 
 

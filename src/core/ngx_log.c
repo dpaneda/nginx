@@ -148,6 +148,16 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
 
 #endif
 {
+    static unsigned logged = 0;
+
+    // Rate limiting
+    logged++;
+
+    if ((logged % log->rate_limit) == 0)
+      logged = 0;
+    else
+      return;
+
 #if (NGX_HAVE_VARIADIC_MACROS)
     va_list  args;
 #endif
@@ -358,6 +368,7 @@ ngx_log_init(u_char *prefix)
 
     ngx_log.file = &ngx_log_file;
     ngx_log.log_level = NGX_LOG_NOTICE;
+    ngx_log.rate_limit = 1;
 
     name = (u_char *) NGX_ERROR_LOG_PATH;
 
@@ -500,14 +511,14 @@ ngx_log_set_priority(ngx_conf_t *cf, ngx_str_t *priority, ngx_log_t *log)
 
 
 char *
-ngx_log_set_levels(ngx_conf_t *cf, ngx_log_t *log)
+ngx_log_set_levels(ngx_conf_t *cf, ngx_log_t *log, unsigned index)
 {
     ngx_uint_t   i, n, d;
     ngx_str_t   *value;
 
     value = cf->args->elts;
 
-    for (i = 2; i < cf->args->nelts; i++) {
+    for (i = index; i < cf->args->nelts; i++) {
 
         for (n = 1; n <= NGX_LOG_DEBUG; n++) {
             if (ngx_strcmp(value[i].data, err_levels[n].data) == 0) {
@@ -556,6 +567,7 @@ ngx_log_set_levels(ngx_conf_t *cf, ngx_log_t *log)
 static char *
 ngx_error_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
+    unsigned i;
     ngx_str_t  *value, name;
 #if (NGX_ENABLE_SYSLOG)
     u_char     *off = NULL;
@@ -620,14 +632,23 @@ ngx_error_log(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NULL;
     }
 
-    if (cf->args->nelts == 2) {
-        cf->cycle->new_log.log_level = NGX_LOG_ERR;
-        return NGX_CONF_OK;
+    // Default values
+    cf->cycle->new_log.log_level = NGX_LOG_ERR;
+    cf->cycle->new_log.rate_limit = 1;
+
+    for (i = 2; i < cf->args->nelts; i++) {
+        if (ngx_strncmp(value[i].data, "rate_limit=", 11) == 0) {
+            cf->cycle->new_log.rate_limit = ngx_atoi(value[i].data + 11, value[i].len - 11);
+            if (cf->cycle->new_log.rate_limit == NGX_ERROR)
+                return NGX_CONF_ERROR;
+        } else {
+            cf->cycle->new_log.log_level = 0;
+            if (ngx_log_set_levels(cf, &cf->cycle->new_log, i) == NGX_CONF_ERROR)
+                return NGX_CONF_ERROR;
+        }
     }
 
-    cf->cycle->new_log.log_level = 0;
-
-    return ngx_log_set_levels(cf, &cf->cycle->new_log);
+    return NGX_CONF_OK;
 }
 
 
